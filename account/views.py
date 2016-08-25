@@ -3,6 +3,9 @@ import os
 import codecs
 import qrcode
 import StringIO
+import urllib
+import json
+import re
 from django import http
 from django.contrib import auth
 from django.shortcuts import render
@@ -66,8 +69,47 @@ class UserLoginAPIView(APIView):
         else:
             return serializer_invalid_response(serializer)
 
+    def get(self, request):
+        code = request.GET.get("code", "none")
+        if code == "none":
+            return error_response(u"不能登录，没有code")
+        else:
+            # return error_response(code)
+            token_req = urllib.urlopen(
+                url='http://200.200.0.33/ss/oauth/token',
+                data=urllib.urlencode({
+                    'client_id': 'acm_oj',
+                    'client_secret': 'ddebcbbf61746d0747700900',
+                    'code': code,
+                    'redirect_uri': 'http://%s:%s/api/login' % (
+                    request.META['SERVER_NAME'], request.META['SERVER_PORT']),
+                    'grant_type': 'authorization_code'
+                })
+            )
+            token_response = json.loads(token_req.read())
+            user_data_url = 'http://200.200.0.33/ss/auth/att_oauth2/user.json?%s' % urllib.urlencode({
+                'oauth_token': token_response['access_token'],
+                'host': '200.200.0.33'
+            })
+            user_data_req = urllib.urlopen(user_data_url)
+            user_data = json.loads(user_data_req.read())
+            user = auth.authenticate(username=user_data['info']["name"], password=user_data['info']["password"])
+            if user:
+                auth.login(request, user)
+                return http.HttpResponseRedirect('/problems/')
+            else:
+                user = User.objects.create(username=user_data['info']["name"], real_name=user_data['info']["name"],
+                                           email=user_data['info']["email"])
+                user.set_password(user_data['info']["password"])
+                user.save()
+                the_id = re.findall(r'\d+', user_data['info']["name"])[0]
+                UserProfile.objects.create(user=user, school="深信服大家庭", student_id="%s" % the_id)
+                user = auth.authenticate(username=user_data['info']["name"], password=user_data['info']["password"])
+                auth.login(request, user)
+                return http.HttpResponseRedirect('/problems/')
 
-#@login_required
+
+# @login_required
 def logout(request):
     auth.logout(request)
     return http.HttpResponseRedirect("/")
@@ -322,7 +364,7 @@ class ApplyResetPasswordAPIView(APIView):
             except User.DoesNotExist:
                 return error_response(u"用户不存在")
             if user.reset_password_token_create_time and (
-                now() - user.reset_password_token_create_time).total_seconds() < 20 * 60:
+                        now() - user.reset_password_token_create_time).total_seconds() < 20 * 60:
                 return error_response(u"20分钟内只能找回一次密码")
             user.reset_password_token = rand_str()
             user.reset_password_token_create_time = now()
@@ -477,7 +519,8 @@ class TwoFactorAuthAPIView(APIView):
 
 
 def user_rank_page(request, page=1):
-    ranks = UserProfile.objects.filter(submission_number__gt=0).order_by("-accepted_problem_number", "-submission_number")
+    ranks = UserProfile.objects.filter(submission_number__gt=0).order_by("-accepted_problem_number",
+                                                                         "-submission_number")
     paginator = Paginator(ranks, 20)
     try:
         ranks = paginator.page(int(page))
